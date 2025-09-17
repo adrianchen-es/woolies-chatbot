@@ -41,6 +41,18 @@ The indice must have a spcific mapping that include keyword and semantic fields.
 
 ### Load the data
 You’ll first need to load the recipes into a new index. A Python loader script is included in this repository.
+
+#### Loader dependencies
+You need to install the dependencies for the loader script. It is recommended to use a virtual environment.
+```sh
+python -m venv venv
+source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+python -m pip install ingredient-parser-nlp
+python -m pip install elasticsearch==8.19.1  
+```
+
+#### Execute the loader
+
 ```sh
 python ./python/loader.py --index cooking-recipes ./data/cooking-recipes.json
 ```
@@ -48,10 +60,12 @@ python ./python/loader.py --index cooking-recipes ./data/cooking-recipes.json
 ### Configure the script
 You need to edit the Userscript module and configure the following variables at the top of the script.
 ```js
+const MIN_CART_RESULTS = 3; // Minimum number of items in the cart to trigger the prompt
 const ELASTIC_RECIPES_SEARCH_URL = "https://xxxxx.es.us-east-1.aws.elastic.cloud/cooking-recipes/_search"; // Search endpoint for the cooking-recipes indice
 const COMPLETION_ENDPOINT_URL = "https://xxxxx.es.us-east-1.aws.elastic.cloud/_inference/completion/azureopenai-completion-63bknfmstid"; // Inference endpoint for the completion task
 const ELASTIC_API_TOKEN = ""; // Elastic API token
 const SEARCH_TOTAL_RESULTS = 3; // Number of recipes the search will return
+const SEARCH_INGREDIENT_MATCHES = 2; // Number of ingredients from the cart to include in the search query
  ```
 
 ### Install the script in Violentmonkey

@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Woolies Elastic Agent
 // @namespace    http://tampermonkey.net/
-// @version      2025-06-24
+// @version      2025-09-16
 // @description  This is a small agent that demontrates how to use ElasticSearch as a RAG plaform.
 // @author       You
 // @match        https://www.woolworths.com.au/*
+// @match        https://woolworths.com.au/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=woolworths.com.au
 // @grant        GM_xmlhttpRequest
 // @require      https://unpkg.com/parse-ingredient
@@ -16,12 +17,14 @@
 
     // Configuration constants (UPPERCASE_UNDERSCORE)
     const AGENT_NAME = "Elastic AI Agent";
-    const WELCOME_MESSAGE = "Hello I'm your cooking assistant made by Elastic for Woolies.";
+    const MIN_CART_RESULTS = 3;
+    const WELCOME_MESSAGE = `Hello I'm your cooking assistant made by Elastic for Woolies.\n I can make suggestions once you have more than ${MIN_CART_RESULTS} items in your cart.`;
     const WOOLIES_GET_CART_URL = "https://www.woolworths.com.au/apis/ui/Trolley";
     const ELASTIC_RECIPES_SEARCH_URL = "https://sandbox-search-genai-e76ccd.es.us-east-1.aws.elastic.cloud/cooking-recipes/_search";
     const COMPLETION_ENDPOINT_URL = "https://sandbox-search-genai-e76ccd.es.us-east-1.aws.elastic.cloud/_inference/completion/azureopenai-completion-63bknfmstid";
-    const ELASTIC_API_TOKEN = "";
+    const ELASTIC_API_TOKEN = ""; // <-- ADD YOUR ELASTIC API KEY HERE
     const SEARCH_TOTAL_RESULTS = 3;
+    const SEARCH_INGREDIENT_MATCHES = 2;
     const SAVED_CHAT_KEY = 'woolies-chatbot-messages';
     const ENABLE_AGENT_LOGGING = true;
 
@@ -273,14 +276,17 @@
     // --- API and Business Logic ---
 
     function buildCartStandardizationPrompt(shoppingCartItems) {
+        const joinedCartItems = shoppingCartItems.map(item => item).join('\n- ');
+        //console.log(joinedCartItems);
         return `You are provided with a list of grocery items from a customer's shopping cart. Your task is to process this list by performing the following steps:
         - Standardize Item Names: Convert each item name into its generic ingredient name.
         - Remove Specific Details: Eliminate any unnecessary information such as brand names, weights, quantities, or packaging details.
         - Maintain Clarity: Ensure the generic name remains as close as possible to the original item name for clarity.
         - Format Output: Present the cleaned list as a single line of text, with all ingredient names in lowercase and separated by spaces
+        - Respond only with the cleaned list, without any additional commentary or formatting.
 
         The list of items:
-        - ${shoppingCartItems.map(item => item).join('\n- ')}
+        - ${joinedCartItems}
         `;
     }
 
@@ -288,9 +294,10 @@
         return `You are a cooking assistant specializing in analyzing recipes and shopping carts to identify missing ingredients.
             Instructions for structuring your answer:
             - When you suggest an ingredient as a replacement or a complement, you always highlight it as a hyperlink (<a> tag with the attribue target="_self") with the following URL attached to the link: https://www.woolworths.com.au/shop/search/products?searchTerm=<ingredient> (replace <ingredient> with the name of the ingredient you just listed).
-            - Your response must be in HTML format. Tthe response will be inserted in an existing <div> element.
+            - Do not respond in markdown. Your response must be in HTML format. The response will be inserted in an existing <div> element.
             - Make sure you had new lines (tag <br \>) when it's necessary.
             - The first part of your answer is a mention in bold (use the HTML tag <strong>), to congratulate the customer on selecting a delicious recipe. Keep a casual and funny tone.
+            - Try to maximise the usage of the items in the cart.
             - In the first part of your answer, include a note indicating if the recipe is suited to a particular diet (e.g., gluten‑free, vegan, or vegetarian).
             - The second part is a list of all missing ingredients. You can rename the ingredients into something more generic. Keep it short and simple.
             - You'll list only the core ingredients of the recipe. Regroup the basic ingredients (e.g., salt, pepper, etc.) into categories.
@@ -302,7 +309,7 @@
             - A user's shopping cart list.
 
             Task:
-            Compare the shopping cart with the recipe's ingredients and instructions. Provide a clear list of essential missing ingredients that the user needs to purchase to complete the recipe.
+            Compare the shopping cart with the recipe's ingredients and instructions. Provide a clear list of essential missing ingredients that the user needs to purchase to complete the recipe. Acknowledge the ingredients in the cart that can be reused and acknowledge any excess ingredients and suggest alternatives for them.
 
             Recipe Ingredients:
             ${recipeIngredients.map(ing => `- ${ing}`).join('\n')}
@@ -367,7 +374,48 @@
     }
 
     function triggerRecipeSearch(preference) {
-        if (cartProductNames.length >= 3) {
+        if (cartProductNames.length >= MIN_CART_RESULTS) {
+            let itemListTerms = [];
+            arrItemsListKeywords.split(' ').forEach(term => {
+                itemListTerms.push(term.trim().toLowerCase());
+            });
+            itemListTerms = Array.from(new Set(itemListTerms)); // Unique terms
+            console.log(`Item List Terms: ${itemListTerms}`);
+
+            // Properly construct the query object
+            const query = {
+                retriever: {
+                    rrf: {
+                        retrievers: [
+                            {
+                                standard: {
+                                    query: {
+                                        terms_set: {
+                                            ingredients_keywords: {
+                                                terms: itemListTerms,
+                                                minimum_should_match: SEARCH_INGREDIENT_MATCHES
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                standard: {
+                                    query: {
+                                        semantic: {
+                                            field: "chief_review",
+                                            query: preference
+                                        }
+                                    },
+                                    _name: "preferences"
+                                }
+                            }
+                        ]
+                    }
+                },
+                size: SEARCH_TOTAL_RESULTS
+            };
+            console.log(`Query object:`, query);
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: ELASTIC_RECIPES_SEARCH_URL,
@@ -375,38 +423,11 @@
                     'Content-Type': 'application/json',
                     'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
                 },
-                data: JSON.stringify({
-                    retriever: {
-                        rrf: {
-                            retrievers: [
-                                {
-                                    standard: {
-                                        query: {
-                                          term: {
-                                            ingredients_keywords: arrItemsListKeywords
-                                          }
-                                        }
-                                    }
-                                },
-                                {
-                                    standard: {
-                                        query: {
-                                            semantic: {
-                                                field: "chief_review",
-                                                query: preference
-                                            }
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    size: 3
-                }),
+                data: JSON.stringify(query),
                 onload: function (response) {
                     try {
                         const data = JSON.parse(response.responseText);
-                        //logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
+                        logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
                         let recipes = [];
                         if (data.hits && data.hits.hits) {
                             recipes = data.hits.hits.map((hit, idx) => ({
@@ -431,6 +452,7 @@
                                 `</ul>`;
                         } else {
                             messageBox.textContent = "No recipes found.";
+                            console.log(data);
                         }
                         contentContainer.appendChild(messageBox);
                         contentContainer.scrollTop = contentContainer.scrollHeight;
@@ -477,6 +499,7 @@
                     if (arrItemsListKeywords) {
                         // Ask for user preference before searching, only if not already shown
                         // Optionally, you can add a flag to avoid showing multiple times in a session
+                        console.log(`Array Items: ${arrItemsListKeywords}`)
                         appendMessage("We'd like to recommend you some recipes based on the content of your shopping cart, anything else we should know?");
                         sendBtn.disabled = false;
                         // Temporarily override send button and input for preference
@@ -576,7 +599,8 @@
                                     .then(response => response.json())
                                     .then(data => {
                                         if (data.AvailableItems && Array.isArray(data.AvailableItems)) {
-                                            updateCartProductNames(data.AvailableItems.map(item => item.Name));
+                                            let newCartItem = data.AvailableItems.map(item => item.Name)
+                                            updateCartProductNames(newCartItem);
                                         }
                                     })
                                     .catch(error => console.error('Elastic AI Agent - Error calling the Woolworths Trolley API::', error));
