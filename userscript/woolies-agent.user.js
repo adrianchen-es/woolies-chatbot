@@ -427,7 +427,7 @@
                 onload: function (response) {
                     try {
                         const data = JSON.parse(response.responseText);
-                        logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
+                        //logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
                         let recipes = [];
                         if (data.hits && data.hits.hits) {
                             recipes = data.hits.hits.map((hit, idx) => ({
