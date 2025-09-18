@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Woolies Elastic Agent
 // @namespace    http://tampermonkey.net/
-// @version      2025-09-16
+// @version      2025-09-18
 // @description  This is a small agent that demontrates how to use ElasticSearch as a RAG plaform.
 // @author       You
 // @match        https://www.woolworths.com.au/*
@@ -446,6 +446,7 @@
         return `You are a cooking assistant specializing in analyzing recipes and shopping carts to identify missing ingredients.
             Instructions for structuring your answer:
             - When you suggest an ingredient as a replacement or a complement, you always highlight it as a hyperlink (<a> tag with the attribue target="_self") with the following URL attached to the link: https://www.woolworths.com.au/shop/search/products?searchTerm=<ingredient> (replace <ingredient> with the name of the ingredient you just listed).
+            - When you suggest an ingredient as a replacement or a complement, also provide a dummy button to add recommended item to the cart. 
             - Do not respond in markdown. Your response must be in HTML format. The response will be inserted in an existing <div> element.
             - Make sure you had new lines (tag <br \>) when it's necessary.
             - The first part of your answer is a mention in bold (use the HTML tag <strong>), to congratulate the customer on selecting a delicious recipe. Keep a casual and funny tone.
