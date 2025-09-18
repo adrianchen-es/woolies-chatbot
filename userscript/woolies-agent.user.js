@@ -27,6 +27,8 @@
     const SEARCH_INGREDIENT_MATCHES = 2;
     const SAVED_CHAT_KEY = 'woolies-chatbot-messages';
     const ENABLE_AGENT_LOGGING = true;
+    const MAX_RETRY_ATTEMPTS = 3;
+    const RETRY_DELAY_BASE_MS = 1000;
 
     // CSS for all elements of the Elastic Agent Window
     const elasticAgentCSS = `
@@ -221,6 +223,52 @@
             font-size: 15px;
             font-family: Roboto, Arial, sans-serif;
         }
+
+        /* Loading indicator styles */
+        #elastic-agent-window .loading-box {
+            width: 90%;
+            margin: 10px auto;
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+
+            background: #24bbb1;
+            color: #36454F;
+
+            font-family: Roboto, Arial, sans-serif;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* Loading spinner */
+        #elastic-agent-window .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #36454F;
+            border-top: 2px solid transparent;
+            border-radius: 50%;
+            animation: elastic-spinner 1s linear infinite;
+        }
+
+        @keyframes elastic-spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Disabled state for input during loading */
+        #elastic-agent-window .footer-input:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        #elastic-agent-window .clear-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            background: #ccc;
+            color: #666;
+        }
     `;
 
     // Global variables
@@ -269,7 +317,111 @@
     // Save chat to localStorage
     function saveChat() {
         if (contentContainer) {
-            localStorage.setItem(SAVED_CHAT_KEY, contentContainer.innerHTML);
+            // Clone the content and remove loading indicators before saving
+            const contentClone = contentContainer.cloneNode(true);
+            const loadingBoxes = contentClone.querySelectorAll('.loading-box');
+            loadingBoxes.forEach(box => box.remove());
+            localStorage.setItem(SAVED_CHAT_KEY, contentClone.innerHTML);
+        }
+    }
+
+    // Retry function for handling failed API calls
+    function retryWithBackoff(fn, maxAttempts = MAX_RETRY_ATTEMPTS, baseDelay = RETRY_DELAY_BASE_MS) {
+        return new Promise((resolve, reject) => {
+            let attempts = 0;
+            
+            function attempt() {
+                attempts++;
+                fn()
+                    .then(resolve)
+                    .catch(error => {
+                        if (attempts >= maxAttempts) {
+                            reject(error);
+                            return;
+                        }
+                        
+                        // Check if it's a retryable error (400, 408 status codes or timeout-related errors)
+                        const isRetryable = error.status === 400 || 
+                                          error.status === 408 || // Request Timeout
+                                          (error.responseText && error.responseText.includes('timeout')) ||
+                                          (error.responseText && error.responseText.includes('model'));
+                        
+                        if (!isRetryable) {
+                            reject(error);
+                            return;
+                        }
+                        
+                        const delay = baseDelay * Math.pow(2, attempts - 1); // Exponential backoff
+                        console.log(`Elastic AI Agent - Retry attempt ${attempts}/${maxAttempts} after ${delay}ms delay`);
+                        
+                        // Provide specific user feedback based on error type
+                        let retryMessage = `Retrying... (${attempts}/${maxAttempts})`;
+                        if (error.status === 408) {
+                            retryMessage = `Request timed out, retrying... (${attempts}/${maxAttempts})`;
+                        } else if (error.status === 400) {
+                            retryMessage = `Server busy, retrying... (${attempts}/${maxAttempts})`;
+                        }
+                        
+                        updateLoadingMessage(retryMessage);
+                        setTimeout(attempt, delay);
+                    });
+            }
+            
+            attempt();
+        });
+    }
+
+    // Loading indicator functions
+    let currentLoadingBox = null;
+
+    function showLoadingIndicator(message = "Loading...") {
+        // Remove any existing loading indicator
+        hideLoadingIndicator();
+        
+        // Create loading box
+        currentLoadingBox = document.createElement('div');
+        currentLoadingBox.className = 'loading-box';
+        
+        // Create spinner
+        const spinner = document.createElement('div');
+        spinner.className = 'loading-spinner';
+        
+        // Create message
+        const messageText = document.createElement('span');
+        messageText.textContent = message;
+        
+        currentLoadingBox.appendChild(spinner);
+        currentLoadingBox.appendChild(messageText);
+        
+        contentContainer.appendChild(currentLoadingBox);
+        contentContainer.scrollTop = contentContainer.scrollHeight;
+        
+        // Disable input and send button during loading
+        if (input) input.disabled = true;
+        if (sendBtn) sendBtn.disabled = true;
+        
+        return currentLoadingBox;
+    }
+
+    function hideLoadingIndicator() {
+        if (currentLoadingBox) {
+            if (currentLoadingBox.parentNode) {
+                currentLoadingBox.parentNode.removeChild(currentLoadingBox);
+            }
+            currentLoadingBox = null;
+        }
+        
+        // Re-enable input and send button
+        if (input) input.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+    }
+
+    function updateLoadingMessage(message) {
+        if (currentLoadingBox) {
+            const messageSpan = currentLoadingBox.querySelector('span');
+            if (messageSpan) {
+                messageSpan.textContent = message;
+            }
         }
     }
 
@@ -375,6 +527,9 @@
 
     function triggerRecipeSearch(preference) {
         if (cartProductNames.length >= MIN_CART_RESULTS) {
+            // Show loading indicator
+            showLoadingIndicator("Searching for recipes...");
+            
             let itemListTerms = [];
             arrItemsListKeywords.split(' ').forEach(term => {
                 itemListTerms.push(term.trim().toLowerCase());
@@ -416,55 +571,93 @@
                 size: SEARCH_TOTAL_RESULTS
             };
             console.log(`Query object:`, query);
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: ELASTIC_RECIPES_SEARCH_URL,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
-                },
-                data: JSON.stringify(query),
-                onload: function (response) {
-                    try {
-                        const data = JSON.parse(response.responseText);
-                        //logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
-                        let recipes = [];
-                        if (data.hits && data.hits.hits) {
-                            recipes = data.hits.hits.map((hit, idx) => ({
-                                name: hit._source && hit._source.name ? hit._source.name : "No title",
-                                url: hit._source && hit._source.url ? hit._source.url : "#",
-                                idx,
-                                full: hit._source
-                            }));
+            
+            // Wrap the GM_xmlhttpRequest in a Promise for retry functionality
+            const performSearch = () => {
+                return new Promise((resolve, reject) => {
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: ELASTIC_RECIPES_SEARCH_URL,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
+                        },
+                        data: JSON.stringify(query),
+                        onload: function (response) {
+                            if (response.status === 400 || response.status === 408) {
+                                // Reject with status for retry logic
+                                reject({ status: response.status, responseText: response.responseText });
+                                return;
+                            }
+                            
+                            try {
+                                const data = JSON.parse(response.responseText);
+                                //logMessageBox('Learn more about Semantic Search', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed?slide=id.g36e6b177a49_0_264#slide=id.g36e6b177a49_0_264');
+                                let recipes = [];
+                                if (data.hits && data.hits.hits) {
+                                    recipes = data.hits.hits.map((hit, idx) => ({
+                                        name: hit._source && hit._source.name ? hit._source.name : "No title",
+                                        url: hit._source && hit._source.url ? hit._source.url : "#",
+                                        idx,
+                                        full: hit._source
+                                    }));
+                                }
+                                resolve({ recipes, data });
+                            } catch (e) {
+                                reject(e);
+                            }
+                        },
+                        onerror: function (error) {
+                            reject(error);
                         }
-                        lastRecipes = recipes;
-                        const messageBox = document.createElement('div');
-                        messageBox.className = 'message-box';
-                        if (recipes.length) {
-                            messageBox.innerHTML = `The content of your cart looks great! Our top recipes that match your selection:<br><br><ul>` +
-                                recipes.map(recipe =>
-                                    `<li>
-                                        <a href="${recipe.url}" class="recipe-link" data-recipe-idx="${recipe.idx}">
-                                            ${recipe.name}
-                                        </a>
-                                    </li>`
-                                ).join('') +
-                                `</ul>`;
-                        } else {
-                            messageBox.textContent = "No recipes found.";
-                            console.log(data);
-                        }
-                        contentContainer.appendChild(messageBox);
-                        contentContainer.scrollTop = contentContainer.scrollHeight;
-                        saveChat();
-                    } catch (e) {
-                        console.error('Elastic AI Agent - Error parsing response from the Search API', e);
+                    });
+                });
+            };
+            
+            // Use retry mechanism for the search
+            retryWithBackoff(performSearch)
+                .then(({ recipes, data }) => {
+                    hideLoadingIndicator();
+                    lastRecipes = recipes;
+                    const messageBox = document.createElement('div');
+                    messageBox.className = 'message-box';
+                    if (recipes.length) {
+                        messageBox.innerHTML = `The content of your cart looks great! Our top recipes that match your selection:<br><br><ul>` +
+                            recipes.map(recipe =>
+                                `<li>
+                                    <a href="${recipe.url}" class="recipe-link" data-recipe-idx="${recipe.idx}">
+                                        ${recipe.name}
+                                    </a>
+                                </li>`
+                            ).join('') +
+                            `</ul>`;
+                    } else {
+                        messageBox.textContent = "No recipes found.";
+                        console.log(data);
                     }
-                },
-                onerror: function (error) {
-                    console.error('Elastic AI Agent - Error calling the Search API:', error);
-                }
-            });
+                    contentContainer.appendChild(messageBox);
+                    contentContainer.scrollTop = contentContainer.scrollHeight;
+                    saveChat();
+                })
+                .catch(error => {
+                    hideLoadingIndicator();
+                    console.error('Elastic AI Agent - Error after retries:', error);
+                    const errorBox = document.createElement('div');
+                    errorBox.className = 'error-box';
+                    
+                    // Provide specific error message based on error type
+                    let errorMessage = "Sorry, we're experiencing some technical difficulties. Please try again later.";
+                    if (error.status === 408) {
+                        errorMessage = "The search request timed out. Please check your connection and try again.";
+                    } else if (error.status === 400) {
+                        errorMessage = "The search service is currently busy. Please try again in a few moments.";
+                    }
+                    
+                    errorBox.textContent = errorMessage;
+                    contentContainer.appendChild(errorBox);
+                    contentContainer.scrollTop = contentContainer.scrollHeight;
+                    saveChat();
+                });
         }
     }
 
@@ -477,47 +670,83 @@
             return;
         }
 
+        // Show loading indicator for cart processing
+        showLoadingIndicator("Processing your cart items...");
+
         const payload = {
             input: buildCartStandardizationPrompt(cartProductNames)
         };
 
-        GM_xmlhttpRequest({
-            method: 'POST',
-            url: COMPLETION_ENDPOINT_URL,
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
-            },
-            data: JSON.stringify(payload),
-            onload: function (response) {
-                try {
-                    let outer = JSON.parse(response.responseText);
-                    if (typeof outer === 'string') {
-                        outer = JSON.parse(outer);
+        // Wrap the cart standardization request in retry logic
+        const performCartStandardization = () => {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: COMPLETION_ENDPOINT_URL,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
+                    },
+                    data: JSON.stringify(payload),
+                    onload: function (response) {
+                        if (response.status === 400 || response.status === 408) {
+                            // Reject with status for retry logic
+                            reject({ status: response.status, responseText: response.responseText });
+                            return;
+                        }
+                        
+                        try {
+                            let outer = JSON.parse(response.responseText);
+                            if (typeof outer === 'string') {
+                                outer = JSON.parse(outer);
+                            }
+                            resolve(outer);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    },
+                    onerror: function (e) {
+                        reject(e);
                     }
-                    arrItemsListKeywords = outer?.completion?.[0]?.result;
-                    if (arrItemsListKeywords) {
-                        // Ask for user preference before searching, only if not already shown
-                        // Optionally, you can add a flag to avoid showing multiple times in a session
-                        console.log(`Array Items: ${arrItemsListKeywords}`)
-                        appendMessage("We'd like to recommend you some recipes based on the content of your shopping cart, anything else we should know?");
-                        sendBtn.disabled = false;
-                        // Temporarily override send button and input for preference
-                        sendBtn.onclick = handlePreferenceSend;
-                        input.onkeydown = function (e) {
-                            if (e.key === 'Enter') handlePreferenceSend();
-                        };
-                    } else {
-                        console.warn("Elastic AI Agent - No result found in the cart standardization response.");
-                    }
-                } catch (e) {
-                    console.error('Elastic AI Agent - Error parsing the response of the Elastic Inference Endpoint (cart standardization):', e);
+                });
+            });
+        };
+
+        // Use retry mechanism for cart standardization
+        retryWithBackoff(performCartStandardization)
+            .then(outer => {
+                hideLoadingIndicator();
+                arrItemsListKeywords = outer?.completion?.[0]?.result;
+                if (arrItemsListKeywords) {
+                    // Ask for user preference before searching, only if not already shown
+                    // Optionally, you can add a flag to avoid showing multiple times in a session
+                    console.log(`Array Items: ${arrItemsListKeywords}`)
+                    appendMessage("We'd like to recommend you some recipes based on the content of your shopping cart, anything else we should know?");
+                    sendBtn.disabled = false;
+                    // Temporarily override send button and input for preference
+                    sendBtn.onclick = handlePreferenceSend;
+                    input.onkeydown = function (e) {
+                        if (e.key === 'Enter') handlePreferenceSend();
+                    };
+                } else {
+                    console.warn("Elastic AI Agent - No result found in the cart standardization response.");
+                    appendMessage("Sorry, we couldn't process your cart items. Please try adding more items.", 'error-box');
                 }
-            },
-            onerror: function (e) {
-                console.error('Elastic AI Agent - Error calling the Elastic Inference Endpoint (cart standardization):', e);
-            }
-        });
+            })
+            .catch(e => {
+                hideLoadingIndicator();
+                console.error('Elastic AI Agent - Error after retries (cart standardization):', e);
+                
+                // Provide specific error message based on error type
+                let errorMessage = "Sorry, there was an error processing your cart. Please try again.";
+                if (e.status === 408) {
+                    errorMessage = "Cart processing timed out. Please check your connection and try again.";
+                } else if (e.status === 400) {
+                    errorMessage = "The processing service is currently busy. Please try again in a few moments.";
+                }
+                
+                appendMessage(errorMessage, 'error-box');
+            });
     }
 
     // --- UI Setup ---
@@ -618,6 +847,10 @@
         contentContainer.addEventListener('click', function (e) {
             if (e.target.classList.contains('recipe-link')) {
                 e.preventDefault();
+                
+                // Show loading indicator for recipe analysis
+                showLoadingIndicator("Analyzing recipe and your cart...");
+                
                 const idx = e.target.getAttribute('data-recipe-idx');
                 const recipe = lastRecipes.find(r => r.idx == idx);
                 if (recipe && recipe.full) {
@@ -628,35 +861,73 @@
                         )
                     };
                     //logMessageBox('Learn more about RAG architecture', 'https://docs.google.com/presentation/d/e/2PACX-1vQWjI-O0PAAp3eb6mia0lP8dOni6LO5zCQVQGz0HMX7XfoQu5H-OdLeKNt0945XY9yHQkkSU5EX-4sW/pubembed');
-                    GM_xmlhttpRequest({
-                        method: 'POST',
-                        url: COMPLETION_ENDPOINT_URL,
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
-                        },
-                        data: JSON.stringify(payload),
-                        onload: function (response) {
-                            try {
-                                let outer = JSON.parse(response.responseText);
-                                if (typeof outer === 'string') {
-                                    outer = JSON.parse(outer);
+                    
+                    // Wrap the recipe analysis request in retry logic
+                    const performRecipeAnalysis = () => {
+                        return new Promise((resolve, reject) => {
+                            GM_xmlhttpRequest({
+                                method: 'POST',
+                                url: COMPLETION_ENDPOINT_URL,
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `ApiKey ${ELASTIC_API_TOKEN}`
+                                },
+                                data: JSON.stringify(payload),
+                                onload: function (response) {
+                                    if (response.status === 400 || response.status === 408) {
+                                        // Reject with status for retry logic
+                                        reject({ status: response.status, responseText: response.responseText });
+                                        return;
+                                    }
+                                    
+                                    try {
+                                        let outer = JSON.parse(response.responseText);
+                                        if (typeof outer === 'string') {
+                                            outer = JSON.parse(outer);
+                                        }
+                                        resolve(outer);
+                                    } catch (e) {
+                                        reject(e);
+                                    }
+                                },
+                                onerror: function (e) {
+                                    reject(e);
                                 }
-                                const resultText = outer?.completion?.[0]?.result;
-                                if (resultText) {
-                                    appendMessage(resultText, 'message-box', true);
-                                } else {
-                                    appendMessage("No result found in the response.", 'error-box');
-                                }
-                            } catch (e) {
-                                console.error('Elastic AI Agent - Error parsing the response of the Elastic Inference Endpoint:', e);
+                            });
+                        });
+                    };
+                    
+                    // Use retry mechanism for recipe analysis
+                    retryWithBackoff(performRecipeAnalysis)
+                        .then(outer => {
+                            hideLoadingIndicator();
+                            const resultText = outer?.completion?.[0]?.result;
+                            if (resultText) {
+                                appendMessage(resultText, 'message-box', true);
+                            } else {
+                                appendMessage("No result found in the response.", 'error-box');
                             }
                             saveChat();
-                        },
-                        onerror: function (e) {
-                            console.error('Elastic AI Agent - Error calling the Elastic Inference Endpoint:', e);
-                        }
-                    });
+                        })
+                        .catch(e => {
+                            hideLoadingIndicator();
+                            console.error('Elastic AI Agent - Error after retries (recipe analysis):', e);
+                            
+                            // Provide specific error message based on error type
+                            let errorMessage = "Sorry, there was an error processing the recipe analysis.";
+                            if (e.status === 408) {
+                                errorMessage = "Recipe analysis timed out. Please check your connection and try again.";
+                            } else if (e.status === 400) {
+                                errorMessage = "The analysis service is currently busy. Please try again in a few moments.";
+                            }
+                            
+                            appendMessage(errorMessage, 'error-box');
+                            saveChat();
+                        });
+                } else {
+                    hideLoadingIndicator();
+                    appendMessage("Recipe information not available.", 'error-box');
+                    saveChat();
                 }
             }
         });
