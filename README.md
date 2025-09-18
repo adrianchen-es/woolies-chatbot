@@ -75,7 +75,6 @@ You can create a new script in Violentmonkey and paste the content of the `wooli
 The current search query is basic and can definitely be improved to increase the relevancy of the results.
 
 Currently, this script only works with the [Woolworths website](https://www.woolworths.com.au). However, it can be adapted for other e‑commerce grocery websites by making a few adjustments:
-- Updating the DOM selectors for various elements (e.g., the “Add to Cart” button, product names, etc.)
 - Identifying the API endpoint that returns the current contents of the shopping cart
 
 If you're not comfortable diving deep into JavaScript, you can still update the script using GitHub Copilot and well-crafted prompts.
